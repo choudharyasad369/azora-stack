@@ -1,0 +1,398 @@
+// Prisma Schema for Azora Stack SaaS Marketplace
+
+generator client {
+  provider = "prisma-client-js"
+ // previewFeatures = ["fullTextSearch", "fullTextIndex"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  BUYER
+  SELLER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  PENDING_VERIFICATION
+}
+
+enum ProjectStatus {
+  DRAFT
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+  ARCHIVED
+}
+
+enum OrderStatus {
+  CREATED
+  PAYMENT_PENDING
+  PAYMENT_COMPLETED
+  PAYMENT_FAILED
+  REFUNDED
+  COMPLETED
+}
+
+enum TransactionType {
+  CREDIT
+  DEBIT
+}
+
+enum TransactionSource {
+  SALE
+  WITHDRAWAL
+  REFUND
+  ADJUSTMENT
+}
+
+enum WithdrawalStatus {
+  PENDING
+  APPROVED
+  PROCESSING
+  COMPLETED
+  REJECTED
+  CANCELLED
+}
+
+model User {
+  id                String              @id @default(cuid())
+  email             String              @unique
+  password          String
+  name              String
+  role              UserRole            @default(BUYER)
+  status            UserStatus          @default(PENDING_VERIFICATION)
+  emailVerified     Boolean             @default(false)
+  emailVerifyToken  String?             @unique
+  resetToken        String?             @unique
+  resetTokenExpiry  DateTime?
+  
+  // Wallet
+  walletBalance     Decimal             @default(0) @db.Decimal(10, 2)
+  
+  // Profile
+  avatar            String?
+  bio               String?             @db.Text
+  phone             String?
+  
+  // Bank Details (for sellers)
+  bankName          String?
+  accountNumber     String?
+  ifscCode          String?
+  accountHolderName String?
+  upiId             String?
+  
+  // Metadata
+  lastLoginAt       DateTime?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  
+  // Relations
+  projects          Project[]
+  orders            Order[]
+  transactions      WalletTransaction[]
+  withdrawals       Withdrawal[]
+  auditLogs         AuditLog[]
+  purchaseRequests  PurchaseRequest[]
+
+  @@index([email])
+  @@index([role])
+  @@index([status])
+  @@map("users")
+}
+
+model Project {
+  id                  String          @id @default(cuid())
+  title               String
+  slug                String          @unique
+  description         String          @db.Text
+  shortDescription    String
+  
+  // Pricing
+  price               Decimal         @db.Decimal(10, 2)
+  listingFee          Decimal         @db.Decimal(10, 2) // Historical snapshot
+  commissionRate      Decimal         @db.Decimal(5, 2)  // Historical snapshot (50.00 = 50%)
+  
+  // Files
+  fileUrl             String          // S3/R2 path to ZIP file
+  fileSize            BigInt          // in bytes
+  thumbnailUrl        String
+  
+  // Metadata
+  techStack           String[]
+  difficulty          String          // BEGINNER, INTERMEDIATE, ADVANCED
+  demoUrl             String?
+  documentationUrl    String?
+  
+  // Status
+  status              ProjectStatus   @default(DRAFT)
+  rejectionReason     String?         @db.Text
+  
+  // Featured listing
+  isFeatured          Boolean         @default(false)
+  featuredUntil       DateTime?
+  
+  // Analytics
+  viewCount           Int             @default(0)
+  downloadCount       Int             @default(0)
+  salesCount          Int             @default(0)
+  
+  // Seller
+  sellerId            String
+  seller              User            @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  
+  // Metadata
+  publishedAt         DateTime?
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+  
+  // Relations
+  orders              Order[]
+  purchaseRequests    PurchaseRequest[]
+
+  @@index([sellerId])
+  @@index([status])
+  @@index([slug])
+  @@index([createdAt])
+ // @@fulltext([title, description, shortDescription])
+  @@map("projects")
+}
+
+model Order {
+  id                  String          @id @default(cuid())
+  orderNumber         String          @unique // e.g., AZR-2024-00001
+  
+  // Buyer
+  buyerId             String
+  buyer               User            @relation(fields: [buyerId], references: [id])
+  
+  // Project
+  projectId           String
+  project             Project         @relation(fields: [projectId], references: [id])
+  
+  // Pricing (snapshot at time of purchase)
+  projectPrice        Decimal         @db.Decimal(10, 2)
+  platformCommission  Decimal         @db.Decimal(10, 2)
+  sellerEarning       Decimal         @db.Decimal(10, 2)
+  commissionRate      Decimal         @db.Decimal(5, 2) // Historical snapshot
+  
+  // Payment
+  status              OrderStatus     @default(CREATED)
+  paymentGateway      String?         // RAZORPAY, STRIPE
+  paymentId           String?         @unique
+  paymentOrderId      String?
+  paymentSignature    String?
+  
+  // Download
+  downloadUrl         String?         // Signed URL
+  downloadExpiresAt   DateTime?
+  downloadCount       Int             @default(0)
+  lastDownloadAt      DateTime?
+  
+  // Metadata
+  paidAt              DateTime?
+  completedAt         DateTime?
+  refundedAt          DateTime?
+  refundReason        String?         @db.Text
+  
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+  
+  // Relations
+  transactions        WalletTransaction[]
+
+  @@index([buyerId])
+  @@index([projectId])
+  @@index([orderNumber])
+  @@index([status])
+  @@index([createdAt])
+  @@map("orders")
+}
+
+model WalletTransaction {
+  id                  String              @id @default(cuid())
+  
+  // User
+  userId              String
+  user                User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Transaction
+  type                TransactionType
+  source              TransactionSource
+  amount              Decimal             @db.Decimal(10, 2)
+  
+  // Balance tracking
+  balanceBefore       Decimal             @db.Decimal(10, 2)
+  balanceAfter        Decimal             @db.Decimal(10, 2)
+  
+  // Reference
+  orderId             String?
+  order               Order?              @relation(fields: [orderId], references: [id])
+  withdrawalId        String?
+  withdrawal          Withdrawal?         @relation(fields: [withdrawalId], references: [id])
+  
+  // Metadata
+  description         String
+  metadata            Json?
+  createdAt           DateTime            @default(now())
+
+  @@index([userId])
+  @@index([orderId])
+  @@index([withdrawalId])
+  @@index([createdAt])
+  @@map("wallet_transactions")
+}
+
+model Withdrawal {
+  id                  String              @id @default(cuid())
+  withdrawalNumber    String              @unique // e.g., WD-2024-00001
+  
+  // Seller
+  sellerId            String
+  seller              User                @relation(fields: [sellerId], references: [id])
+  
+  // Amount
+  amount              Decimal             @db.Decimal(10, 2)
+  
+  // Bank details snapshot (immutable after creation)
+  bankDetailsSnapshot Json                // Stores bank details at time of request
+  
+  // Status
+  status              WithdrawalStatus    @default(PENDING)
+  
+  // Admin actions
+  reviewedBy          String?             // Admin user ID
+  reviewedAt          DateTime?
+  reviewNotes         String?             @db.Text
+  
+  // Payment proof
+  transactionId       String?             // Bank/UPI transaction ID
+  paymentProof        String?             // URL to proof document
+  
+  // Metadata
+  requestedAt         DateTime            @default(now())
+  completedAt         DateTime?
+  rejectedAt          DateTime?
+  
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  
+  // Relations
+  transactions        WalletTransaction[]
+
+  @@index([sellerId])
+  @@index([status])
+  @@index([withdrawalNumber])
+  @@index([createdAt])
+  @@map("withdrawals")
+}
+
+model PlatformSettings {
+  id                        String    @id @default(cuid())
+  key                       String    @unique
+  value                     String
+  description               String?
+  dataType                  String    @default("string") // string, number, boolean, json
+  
+  updatedAt                 DateTime  @updatedAt
+  updatedBy                 String?   // Admin user ID who last updated
+
+  @@map("platform_settings")
+}
+
+model AuditLog {
+  id                  String    @id @default(cuid())
+  
+  // Actor
+  userId              String
+  user                User      @relation(fields: [userId], references: [id])
+  
+  // Action
+  action              String    // e.g., "PROJECT_APPROVED", "USER_SUSPENDED", "WITHDRAWAL_COMPLETED"
+  entityType          String    // e.g., "PROJECT", "USER", "WITHDRAWAL"
+  entityId            String
+  
+  // Details
+  changes             Json?     // Before/after values
+  metadata            Json?
+  ipAddress           String?
+  userAgent           String?
+  
+  createdAt           DateTime  @default(now())
+
+  @@index([userId])
+  @@index([entityType, entityId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model EmailQueue {
+  id                  String    @id @default(cuid())
+  
+  // Recipient
+  to                  String
+  subject             String
+  
+  // Content
+  templateName        String    // e.g., "WELCOME", "ORDER_CONFIRMATION"
+  templateData        Json
+  htmlContent         String?   @db.Text
+  textContent         String?   @db.Text
+  
+  // Status
+  status              String    @default("PENDING") // PENDING, SENT, FAILED
+  sentAt              DateTime?
+  failedAt            DateTime?
+  errorMessage        String?   @db.Text
+  retryCount          Int       @default(0)
+  
+  // Metadata
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("email_queue")
+}
+
+model PurchaseRequest {
+  id                  String    @id @default(cuid())
+  
+  // Buyer
+  buyerId             String
+  buyer               User      @relation(fields: [buyerId], references: [id])
+  
+  // Project
+  projectId           String
+  project             Project   @relation(fields: [projectId], references: [id])
+  
+  // Request details
+  message             String?   @db.Text
+  status              String    @default("PENDING") // PENDING, APPROVED, REJECTED, COMPLETED
+  
+  // Payment proof
+  paymentProof        String?   // URL to payment screenshot
+  paymentMethod       String?   // UPI, BANK_TRANSFER, etc.
+  transactionId       String?
+  
+  // Admin actions
+  reviewedBy          String?   // Admin user ID
+  reviewedAt          DateTime?
+  reviewNotes         String?   @db.Text
+  
+  // Metadata
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@index([buyerId])
+  @@index([projectId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("purchase_requests")
+}
